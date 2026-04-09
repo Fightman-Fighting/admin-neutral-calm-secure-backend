@@ -6,11 +6,10 @@ import { z } from "zod";
 import { env } from "./config";
 import { requireAdmin } from "./adminAuth";
 import { supabaseAdmin } from "./supabase";
-import { PROMPT_AUDIENCES, PROMPT_PURPOSE_REWRITE, promptComponentsSchema } from "./prompts";
+import { PROMPT_PURPOSE_REWRITE, promptComponentsSchema } from "./prompts";
 
 const app = express();
 const port = Number(env.PORT) || 4001;
-const AUDIENCE_FILTER_OPTIONS = ["all", ...PROMPT_AUDIENCES] as const;
 
 app.use(
   cors({
@@ -41,7 +40,7 @@ app.get("/admin/prompts", requireAdmin, async (req, res) => {
       purpose: z.string().optional(),
       activeOnly: z.coerce.boolean().optional(),
       activeState: z.enum(["all", "active", "deactive"]).optional(),
-      audience: z.enum(AUDIENCE_FILTER_OPTIONS).optional(),
+      audience: z.string().optional(),
       search: z.string().optional(),
       page: z.coerce.number().int().min(1).optional(),
       pageSize: z.coerce.number().int().min(1).max(100).optional(),
@@ -90,7 +89,7 @@ app.post("/admin/prompts", requireAdmin, async (req, res) => {
   const body = z
     .object({
       purpose: z.string().default(PROMPT_PURPOSE_REWRITE),
-      audience: z.enum(PROMPT_AUDIENCES),
+      audience: z.string().min(1),
       name: z.string().min(1),
       system: z.string().min(1),
       is_active: z.boolean().optional(),
@@ -171,7 +170,7 @@ app.patch("/admin/prompts/:id", requireAdmin, async (req, res) => {
     .object({
       name: z.string().min(1),
       system: z.string().min(1),
-      audience: z.enum(PROMPT_AUDIENCES),
+      audience: z.string().min(1),
       is_active: z.boolean().optional(),
     })
     .safeParse(req.body);
@@ -216,6 +215,172 @@ app.patch("/admin/prompts/:id", requireAdmin, async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
   res.json({ prompt_version: data, meta: { durationMs: Date.now() - startedAt } });
 });
+
+// ── Audiences CRUD ──
+
+app.get("/admin/audiences", requireAdmin, async (_req, res) => {
+  const startedAt = Date.now();
+  const { data, error } = await supabaseAdmin
+    .from("audiences")
+    .select("code, label, icon, color, aliases, sort_order, is_active")
+    .order("sort_order", { ascending: true });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ audiences: data || [], meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.post("/admin/audiences", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const body = z
+    .object({
+      code: z.string().min(1).max(40),
+      label: z.string().min(1),
+      icon: z.string().default("Users"),
+      color: z.string().default("slate"),
+      aliases: z.array(z.string()).default([]),
+      sort_order: z.number().int().default(0),
+      is_active: z.boolean().default(true),
+    })
+    .safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "Invalid request body" });
+
+  const { data, error } = await supabaseAdmin
+    .from("audiences")
+    .insert(body.data)
+    .select("code, label, icon, color, aliases, sort_order, is_active")
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json({ audience: data, meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.patch("/admin/audiences/:code", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const code = req.params.code;
+  if (!code) return res.status(400).json({ error: "Missing audience code" });
+
+  const body = z
+    .object({
+      label: z.string().min(1).optional(),
+      icon: z.string().optional(),
+      color: z.string().optional(),
+      aliases: z.array(z.string()).optional(),
+      sort_order: z.number().int().optional(),
+      is_active: z.boolean().optional(),
+    })
+    .safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "Invalid request body" });
+
+  const updates: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body.data)) {
+    if (v !== undefined) updates[k] = v;
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("audiences")
+    .update(updates)
+    .eq("code", code)
+    .select("code, label, icon, color, aliases, sort_order, is_active")
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Audience not found" });
+  res.json({ audience: data, meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.delete("/admin/audiences/:code", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const code = req.params.code;
+  if (!code) return res.status(400).json({ error: "Missing audience code" });
+
+  const { error } = await supabaseAdmin.from("audiences").delete().eq("code", code);
+  if (error) return res.status(400).json({ error: error.message });
+  res.setHeader("x-operation-duration-ms", String(Date.now() - startedAt));
+  res.status(204).send();
+});
+
+// ── Countries CRUD ──
+
+app.get("/admin/countries", requireAdmin, async (_req, res) => {
+  const startedAt = Date.now();
+  const { data, error } = await supabaseAdmin
+    .from("countries")
+    .select("code, label, aliases, sort_order, is_active")
+    .order("sort_order", { ascending: true });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ countries: data || [], meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.post("/admin/countries", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const body = z
+    .object({
+      code: z.string().min(2).max(20),
+      label: z.string().min(1),
+      aliases: z.array(z.string()).default([]),
+      sort_order: z.number().int().default(0),
+      is_active: z.boolean().default(true),
+    })
+    .safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "Invalid request body" });
+
+  const { data, error } = await supabaseAdmin
+    .from("countries")
+    .insert(body.data)
+    .select("code, label, aliases, sort_order, is_active")
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json({ country: data, meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.patch("/admin/countries/:code", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const code = req.params.code;
+  if (!code) return res.status(400).json({ error: "Missing country code" });
+
+  const body = z
+    .object({
+      label: z.string().min(1).optional(),
+      aliases: z.array(z.string()).optional(),
+      sort_order: z.number().int().optional(),
+      is_active: z.boolean().optional(),
+    })
+    .safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "Invalid request body" });
+
+  const updates: Record<string, unknown> = {};
+  if (body.data.label !== undefined) updates.label = body.data.label;
+  if (body.data.aliases !== undefined) updates.aliases = body.data.aliases;
+  if (body.data.sort_order !== undefined) updates.sort_order = body.data.sort_order;
+  if (body.data.is_active !== undefined) updates.is_active = body.data.is_active;
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("countries")
+    .update(updates)
+    .eq("code", code)
+    .select("code, label, aliases, sort_order, is_active")
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Country not found" });
+  res.json({ country: data, meta: { durationMs: Date.now() - startedAt } });
+});
+
+app.delete("/admin/countries/:code", requireAdmin, async (req, res) => {
+  const startedAt = Date.now();
+  const code = req.params.code;
+  if (!code) return res.status(400).json({ error: "Missing country code" });
+
+  const { error } = await supabaseAdmin.from("countries").delete().eq("code", code);
+  if (error) return res.status(400).json({ error: error.message });
+  res.setHeader("x-operation-duration-ms", String(Date.now() - startedAt));
+  res.status(204).send();
+});
+
+// ── Prompts ──
 
 app.delete("/admin/prompts/:id", requireAdmin, async (req, res) => {
   const startedAt = Date.now();
